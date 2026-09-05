@@ -99,10 +99,17 @@ Excepto salud y login, las rutas requieren `Authorization: Bearer <token>`.
 cd naye_fashion_store
 flutter pub get
 flutter analyze
-flutter run --dart-define=URL_API=http://10.0.2.2:3000 --dart-define=TOKEN_JWT=token_temporal
+flutter run
 ```
 
-`TOKEN_JWT` se inyecta únicamente para demostrar la comunicación protegida durante el desarrollo local. No es un mecanismo de autenticación de producción ni reemplaza un login móvil.
+La aplicación inicia en el formulario de login y usa por defecto
+`https://backend-production-0f02.up.railway.app`. Para usar una API local, se puede
+sobrescribir con `--dart-define=URL_API=http://10.0.2.2:3000`.
+
+El login consume `POST /api/autenticacion/iniciar-sesion` y conserva el token
+devuelto en la navegación hacia productos. El formulario de registro consume
+`POST /api/autenticacion/registrarse`; ese endpoint todavía debe estar implementado
+en el backend para que el alta de usuarios funcione.
 
 ## Prisma y TypeORM
 
