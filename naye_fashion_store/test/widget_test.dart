@@ -10,10 +10,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:naye_fashion_store/main.dart';
 
 void main() {
-  testWidgets('muestra el formulario de inicio de sesión', (WidgetTester tester) async {
+  testWidgets('muestra el formulario de inicio de sesión', (
+    WidgetTester tester,
+  ) async {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const MyApp());
-
 
     expect(find.text('NAYE'), findsOneWidget);
     expect(find.text('Iniciar sesión'), findsOneWidget);
