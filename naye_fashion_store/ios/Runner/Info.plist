@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Naye Fashion Store utiliza la cámara para tomar fotografías de los productos que se registrarán en el catálogo.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Naye Fashion Store utiliza sus fotos para seleccionar imágenes de los productos del catálogo.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -1,7 +1,13 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart'
+    as permission_handler;
+import 'package:shared_preferences/shared_preferences.dart';
 
 const urlApi = String.fromEnvironment(
   'URL_API',
@@ -9,6 +15,161 @@ const urlApi = String.fromEnvironment(
 );
 
 void main() => runApp(const AplicacionNaye());
+
+class ProductSyncService {
+  static const String _pendingProductsKey = 'pending_products';
+  static const int maxImageBytes = 5 * 1024 * 1024;
+
+  static Map<String, dynamic> buildProductPayload({
+    required int idCategoria,
+    required String nombre,
+    required String descripcion,
+    required String talla,
+    required String color,
+    required double precio,
+    required int stock,
+    String? fotoUrl,
+  }) {
+    final payload = <String, dynamic>{
+      'idCategoria': idCategoria,
+      'nombre': nombre.trim(),
+      'descripcion': descripcion.trim(),
+      'talla': talla.trim(),
+      'color': color.trim(),
+      'precio': precio,
+      'stock': stock,
+    };
+
+    if (fotoUrl != null && fotoUrl.trim().isNotEmpty) {
+      payload['fotoUrl'] = fotoUrl.trim();
+    }
+
+    return payload;
+  }
+
+  static bool isOnlineResult(String result) => result != 'none';
+
+  static Future<bool> isOnline() async {
+    final results = await Connectivity().checkConnectivity();
+    return results.isNotEmpty && !results.contains(ConnectivityResult.none);
+  }
+
+  static Future<void> savePendingProducts(
+    List<Map<String, dynamic>> products,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final serialized = products.map((product) => jsonEncode(product)).toList();
+    await prefs.setStringList(_pendingProductsKey, serialized);
+  }
+
+  static Future<void> savePendingProduct(Map<String, dynamic> product) async {
+    final pending = await loadPendingProducts();
+    pending.add(product);
+    await savePendingProducts(pending);
+  }
+
+  static Future<List<Map<String, dynamic>>> loadPendingProducts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pending = prefs.getStringList(_pendingProductsKey) ?? const [];
+    return pending
+        .map(
+          (item) => Map<String, dynamic>.from(
+            jsonDecode(item) as Map<String, dynamic>,
+          ),
+        )
+        .toList();
+  }
+
+  static Future<void> clearPendingProducts() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingProductsKey);
+  }
+
+  static Future<void> syncPendingProducts({
+    required String token,
+    required String apiUrl,
+    required Future<void> Function(Map<String, dynamic>) onSend,
+  }) async {
+    final pending = await loadPendingProducts();
+    if (pending.isEmpty || !await isOnline()) {
+      return;
+    }
+
+    final remaining = <Map<String, dynamic>>[];
+    for (final product in pending) {
+      try {
+        await onSend(product);
+      } catch (_) {
+        remaining.add(product);
+      }
+    }
+
+    if (remaining.isEmpty) {
+      await clearPendingProducts();
+    } else {
+      await savePendingProducts(remaining);
+    }
+  }
+
+  static Future<void> sendProduct({
+    required String token,
+    required String apiUrl,
+    required Map<String, dynamic> product,
+  }) async {
+    final imagePath = product['fotoPath'] as String?;
+    final fields = Map<String, dynamic>.from(product)
+      ..remove('fotoPath')
+      ..remove('syncStatus');
+
+    if (imagePath != null && imagePath.isNotEmpty) {
+      final imageFile = File(imagePath);
+      if (!await imageFile.exists()) {
+        throw Exception('La imagen local ya no está disponible.');
+      }
+      if (await imageFile.length() > maxImageBytes) {
+        throw Exception('La imagen supera el tamaño máximo de 5 MB.');
+      }
+
+      final request =
+          http.MultipartRequest('POST', Uri.parse('$apiUrl/api/productos'))
+            ..headers['Authorization'] = 'Bearer $token'
+            ..fields.addAll(
+              fields.map((key, value) => MapEntry(key, value.toString())),
+            )
+            ..files.add(await http.MultipartFile.fromPath('foto', imagePath));
+      final response = await request.send();
+      final body = await response.stream.bytesToString();
+      if (response.statusCode != 200 && response.statusCode != 201) {
+        throw Exception(_responseMessage(response.statusCode, body));
+      }
+      return;
+    }
+
+    final response = await http.post(
+      Uri.parse('$apiUrl/api/productos'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(fields),
+    );
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw Exception(_responseMessage(response.statusCode, response.body));
+    }
+  }
+
+  static String _responseMessage(int statusCode, String body) {
+    try {
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      return (data['mensaje'] ??
+              data['error'] ??
+              'La operación no pudo completarse')
+          .toString();
+    } catch (_) {
+      return 'La operación no pudo completarse ($statusCode)';
+    }
+  }
+}
 
 class AplicacionNaye extends StatelessWidget {
   const AplicacionNaye({super.key});
@@ -263,6 +424,7 @@ class _ProductosPaginaState extends State<ProductosPagina> {
   void initState() {
     super.initState();
     productos = cargarProductos();
+    _sincronizarProductosPendientes();
   }
 
   Future<List<Map<String, dynamic>>> cargarProductos() async {
@@ -281,27 +443,74 @@ class _ProductosPaginaState extends State<ProductosPagina> {
     );
   }
 
+  Future<void> _sincronizarProductosPendientes() async {
+    if (!mounted) return;
+    if (!await ProductSyncService.isOnline()) {
+      return;
+    }
+
+    await ProductSyncService.syncPendingProducts(
+      token: widget.token,
+      apiUrl: urlApi,
+      onSend: (producto) async {
+        await ProductSyncService.sendProduct(
+          token: widget.token,
+          apiUrl: urlApi,
+          product: producto,
+        );
+      },
+    );
+
+    if (mounted) {
+      setState(() => productos = cargarProductos());
+    }
+  }
+
   Future<void> _crearProducto() async {
     final datos = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute(builder: (_) => const NuevoProductoPagina()),
     );
     if (datos == null) return;
+
+    final payload = ProductSyncService.buildProductPayload(
+      idCategoria: datos['idCategoria'] as int,
+      nombre: datos['nombre'] as String,
+      descripcion: datos['descripcion'] as String? ?? '',
+      talla: datos['talla'] as String,
+      color: datos['color'] as String,
+      precio: (datos['precio'] as num).toDouble(),
+      stock: datos['stock'] as int,
+      fotoUrl: datos['fotoUrl'] as String?,
+    );
+    final fotoPath = datos['fotoPath'] as String?;
+    if (fotoPath != null && fotoPath.isNotEmpty) {
+      payload['fotoPath'] = fotoPath;
+      payload['syncStatus'] = 'pending';
+    }
+
     try {
-      final respuesta = await http.post(
-        Uri.parse('$urlApi/api/productos'),
-        headers: {
-          'Authorization': 'Bearer ${widget.token}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode(datos),
-      );
-      if (respuesta.statusCode != 201 && respuesta.statusCode != 200) {
-        throw Exception(_mensajeRespuesta(respuesta));
+      final online = await ProductSyncService.isOnline();
+      if (!online) {
+        await ProductSyncService.savePendingProduct(payload);
+        _mostrarMensaje(
+          'Sin conexión. El producto se guardó en la cola local y se sincronizará cuando haya red.',
+        );
+        return;
       }
+
+      await ProductSyncService.sendProduct(
+        token: widget.token,
+        apiUrl: urlApi,
+        product: payload,
+      );
       setState(() => productos = cargarProductos());
       _mostrarMensaje('Producto agregado correctamente');
     } catch (error) {
+      await ProductSyncService.savePendingProduct(payload);
       _mostrarMensaje(error.toString().replaceFirst('Exception: ', ''));
+      _mostrarMensaje(
+        'El producto quedó pendiente y se reintentará al sincronizar.',
+      );
     }
   }
 
@@ -409,6 +618,21 @@ class _ProductosPaginaState extends State<ProductosPagina> {
                 isLabelVisible: carrito.isNotEmpty,
                 child: const Icon(Icons.shopping_cart_outlined),
               ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Sincronizar pendientes',
+            onPressed: _sincronizarProductosPendientes,
+            icon: FutureBuilder<List<Map<String, dynamic>>>(
+              future: ProductSyncService.loadPendingProducts(),
+              builder: (context, estado) {
+                final cantidad = estado.data?.length ?? 0;
+                return Badge(
+                  isLabelVisible: cantidad > 0,
+                  label: Text('$cantidad'),
+                  child: const Icon(Icons.sync),
+                );
+              },
             ),
           ),
           IconButton(
@@ -567,6 +791,8 @@ class _NuevoProductoPaginaState extends State<NuevoProductoPagina> {
   final _color = TextEditingController();
   final _precio = TextEditingController();
   final _stock = TextEditingController();
+  final ImagePicker _picker = ImagePicker();
+  String? _fotoPath;
 
   @override
   void dispose() {
@@ -584,17 +810,183 @@ class _NuevoProductoPaginaState extends State<NuevoProductoPagina> {
     super.dispose();
   }
 
+  Future<void> _tomarFoto() async {
+    final status = await permission_handler.Permission.camera.status;
+
+    if (status.isDenied) {
+      final shouldAsk = await showPermissionExplanation();
+      if (!shouldAsk) return;
+      final request = await requestCameraPermission();
+
+      if (request.isGranted) {
+        await takeProductPhoto();
+        return;
+      }
+
+      if (request.isPermanentlyDenied) {
+        await _mostrarPermisoBloqueado();
+        return;
+      }
+
+      _mostrarMensaje(
+        'Permiso de cámara denegado. Puedes elegir una imagen existente.',
+      );
+      return;
+    }
+
+    if (status.isPermanentlyDenied) {
+      await _mostrarPermisoBloqueado();
+      return;
+    }
+
+    if (status.isRestricted || status.isLimited) {
+      _mostrarMensaje(
+        'La cámara está restringida o no está disponible. Puedes elegir una imagen existente.',
+      );
+      return;
+    }
+
+    await takeProductPhoto();
+  }
+
+  Future<permission_handler.PermissionStatus> requestCameraPermission() {
+    return permission_handler.Permission.camera.request();
+  }
+
+  Future<bool> showPermissionExplanation() async {
+    final aceptar = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permiso para usar la cámara'),
+        content: const Text(
+          'Necesitamos acceder a la cámara para tomar una fotografía del producto y añadirla al catálogo.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
+    );
+    return aceptar ?? false;
+  }
+
+  Future<void> _mostrarPermisoBloqueado() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permiso de cámara bloqueado'),
+        content: const Text(
+          'El permiso fue bloqueado en los ajustes del sistema. Puedes habilitarlo allí o elegir una imagen existente.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await openAppSettings();
+            },
+            child: const Text('Abrir ajustes'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> takeProductPhoto() async {
+    try {
+      final picked = await _picker.pickImage(
+        source: ImageSource.camera,
+        preferredCameraDevice: CameraDevice.rear,
+        maxWidth: 1200,
+        maxHeight: 1200,
+        imageQuality: 85,
+      );
+
+      if (picked == null) {
+        _mostrarMensaje('No se seleccionó ninguna foto.');
+        return;
+      }
+
+      await _setSelectedImage(picked);
+    } catch (_) {
+      _mostrarMensaje('La cámara no está disponible en este momento.');
+    }
+  }
+
+  Future<void> pickProductImage() async {
+    try {
+      final picked = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1200,
+        maxHeight: 1200,
+        imageQuality: 85,
+      );
+      if (picked == null) return;
+      await _setSelectedImage(picked);
+    } catch (_) {
+      _mostrarMensaje(
+        'No se pudo seleccionar la imagen. Puedes continuar sin fotografía.',
+      );
+    }
+  }
+
+  Future<void> _setSelectedImage(XFile picked) async {
+    final file = File(picked.path);
+    if (!await file.exists()) {
+      _mostrarMensaje('El archivo de imagen no está disponible.');
+      return;
+    }
+    if (await file.length() > ProductSyncService.maxImageBytes) {
+      _mostrarMensaje('La imagen supera el tamaño máximo de 5 MB.');
+      return;
+    }
+    setState(() => _fotoPath = picked.path);
+  }
+
+  Future<void> openAppSettings() async {
+    await permission_handler.openAppSettings();
+  }
+
   void _guardar() {
     if (!_formKey.currentState!.validate()) return;
+    final precio = double.tryParse(_precio.text.replaceAll(',', '.'));
+    final stock = int.tryParse(_stock.text);
+    final categoria = int.tryParse(_categoria.text);
+    if (precio == null ||
+        precio < 0 ||
+        stock == null ||
+        stock < 0 ||
+        categoria == null) {
+      _mostrarMensaje('Revisa categoría, precio y stock.');
+      return;
+    }
     Navigator.pop(context, {
-      'idCategoria': int.parse(_categoria.text),
+      'idCategoria': categoria,
       'nombre': _nombre.text.trim(),
       'descripcion': _descripcion.text.trim(),
       'talla': _talla.text.trim(),
       'color': _color.text.trim(),
-      'precio': double.parse(_precio.text.replaceAll(',', '.')),
-      'stock': int.parse(_stock.text),
+      'precio': precio,
+      'stock': stock,
+      if (_fotoPath != null && _fotoPath!.isNotEmpty) 'fotoUrl': _fotoPath,
+      if (_fotoPath != null && _fotoPath!.isNotEmpty) 'fotoPath': _fotoPath,
     });
+  }
+
+  void _mostrarMensaje(String mensaje) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(mensaje)));
   }
 
   String? _requerido(String? valor) =>
@@ -647,6 +1039,51 @@ class _NuevoProductoPaginaState extends State<NuevoProductoPagina> {
               decoration: const InputDecoration(labelText: 'Stock'),
               keyboardType: TextInputType.number,
               validator: _requerido,
+            ),
+            const SizedBox(height: 18),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.photo_camera_outlined),
+                        const SizedBox(width: 8),
+                        const Expanded(child: Text('Foto del producto')),
+                        TextButton.icon(
+                          onPressed: _tomarFoto,
+                          icon: const Icon(Icons.camera_alt_outlined),
+                          label: const Text('Tomar foto'),
+                        ),
+                        TextButton.icon(
+                          onPressed: pickProductImage,
+                          icon: const Icon(Icons.photo_library_outlined),
+                          label: const Text('Elegir imagen'),
+                        ),
+                      ],
+                    ),
+                    if (_fotoPath != null && _fotoPath!.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.file(
+                          File(_fotoPath!),
+                          height: 180,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Puedes guardar el producto sin fotografía y añadirla después.',
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ),
             const SizedBox(height: 24),
             FilledButton.icon(
