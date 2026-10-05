@@ -1,10 +1,6 @@
 # Naye Fashion Store
 
-Aplicación móvil Flutter con API REST para la gestión de productos, ventas y sincronización de inventario. En esta versión se integra la cámara del dispositivo para registrar fotos de productos y la conectividad de red para sincronizar la información con el backend cuando la red vuelve a estar disponible.
-
-## 1) Selección de capacidades nativas
-
-Se eligieron dos capacidades nativas con valor directo para la solución:
+Aplicación móvil Flutter con API REST para la gestión de productos, ventas y sincronización de inventario. En esta versión se integra la cámalsra del dispositivo para registrar fotos de productos y la conectividad de red para sincronizar la inforflutter emulators --launch
 
 - Cámara: esencial para capturar la fotografía del producto al crear el registro. Permite documentar el inventario y mejorar la experiencia de ventas con visualización rápida del producto.
 - Conectividad de red: esencial para detectar si el dispositivo tiene acceso a internet y sincronizar productos pendientes con el backend, incluso cuando la red estaba indisponible.
